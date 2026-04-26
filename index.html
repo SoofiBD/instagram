@@ -377,37 +377,87 @@ initZone('input-followers', 'zone-followers', 'fname-followers');
 initZone('input-following', 'zone-following', 'fname-following');
 
 // ─── JSON parser: handles all known Instagram export shapes ──────────────────
-function extractUsernames(data) {
+function extractUsernameFromHref(href) {
+  if (!href || typeof href !== 'string') return null;
+  try {
+    // Instagram profile URLs: https://www.instagram.com/username/ or /username
+    const match = href.match(/instagram\.com\/([A-Za-z0-9._]+)/);
+    if (match && match[1]) return match[1].trim().toLowerCase();
+  } catch {}
+  return null;
+}
+
+function extractUsernames(data, label) {
   const usernames = new Set();
+
+  function addUsername(val) {
+    if (val && typeof val === 'string' && val.trim()) {
+      usernames.add(val.trim().toLowerCase());
+    }
+  }
 
   function traverse(obj) {
     if (!obj) return;
+
+    // Plain string (some formats use simple string arrays)
+    if (typeof obj === 'string') {
+      addUsername(obj);
+      return;
+    }
+
     if (Array.isArray(obj)) {
       for (const item of obj) traverse(item);
-    } else if (typeof obj === 'object') {
-      // Standard shape found in string_list_data
-      if (Array.isArray(obj.string_list_data)) {
-        for (const e of obj.string_list_data) {
-          if (e && typeof e.value === 'string' && e.value.trim()) {
-            usernames.add(e.value.trim().toLowerCase());
-          }
+      return;
+    }
+
+    if (typeof obj !== 'object') return;
+
+    // ── string_list_data: the standard Instagram shape ──
+    if (Array.isArray(obj.string_list_data)) {
+      for (const e of obj.string_list_data) {
+        if (!e) continue;
+        // Primary: value field
+        if (typeof e.value === 'string' && e.value.trim()) {
+          addUsername(e.value);
+        }
+        // Fallback: extract from href URL if value is empty
+        else if (e.href) {
+          const fromHref = extractUsernameFromHref(e.href);
+          if (fromHref) addUsername(fromHref);
         }
       }
-      // Flat shape fallback
-      if (typeof obj.value === 'string' && obj.value.trim() && (obj.href || obj.timestamp)) {
-        usernames.add(obj.value.trim().toLowerCase());
-      }
-      
-      // Traverse all properties to find nested structures
-      for (const key of Object.keys(obj)) {
-        if (key !== 'string_list_data') {
-          traverse(obj[key]);
-        }
-      }
+    }
+
+    // ── title field: some export versions put the username here ──
+    if (typeof obj.title === 'string' && obj.title.trim() &&
+        (obj.string_list_data || obj.media_list_data || obj.timestamp || obj.href)) {
+      addUsername(obj.title);
+    }
+
+    // ── Flat shape fallback ──
+    if (typeof obj.value === 'string' && obj.value.trim() &&
+        !Array.isArray(obj.string_list_data) &&
+        (obj.href || obj.timestamp)) {
+      addUsername(obj.value);
+    }
+
+    // ── username / user field (alternative formats) ──
+    if (typeof obj.username === 'string' && obj.username.trim()) {
+      addUsername(obj.username);
+    }
+    if (typeof obj.user === 'string' && obj.user.trim()) {
+      addUsername(obj.user);
+    }
+
+    // ── Recurse all child properties ──
+    for (const key of Object.keys(obj)) {
+      if (key === 'string_list_data') continue; // already processed above
+      traverse(obj[key]);
     }
   }
 
   traverse(data);
+  console.log(`[Follow Analyzer] ${label}: found ${usernames.size} usernames`, [...usernames].slice(0, 5));
   return usernames;
 }
 
@@ -451,8 +501,14 @@ async function analyze() {
   try {
     const [fData, ingData] = await Promise.all([readJSON(fFile), readJSON(ingFile)]);
 
-    const followersSet = extractUsernames(fData);
-    const followingSet = extractUsernames(ingData);
+    // Debug: log raw JSON structure keys to help diagnose parsing issues
+    console.log('[Follow Analyzer] Followers raw type:', Array.isArray(fData) ? 'array' : typeof fData,
+      Array.isArray(fData) ? `(${fData.length} items)` : `(keys: ${Object.keys(fData).join(', ')})`);
+    console.log('[Follow Analyzer] Following raw type:', Array.isArray(ingData) ? 'array' : typeof ingData,
+      Array.isArray(ingData) ? `(${ingData.length} items)` : `(keys: ${Object.keys(ingData).join(', ')})`);
+
+    const followersSet = extractUsernames(fData, 'Followers');
+    const followingSet = extractUsernames(ingData, 'Following');
 
     if (followersSet.size === 0 && followingSet.size === 0)
       throw new Error('No usernames found. Make sure you uploaded the correct Instagram JSON export files.');
