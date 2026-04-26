@@ -378,46 +378,36 @@ initZone('input-following', 'zone-following', 'fname-following');
 
 // ─── JSON parser: handles all known Instagram export shapes ──────────────────
 function extractUsernames(data) {
-  let items = [];
-
-  if (Array.isArray(data)) {
-    // followers.json — direct top-level array
-    items = data;
-  } else if (data && typeof data === 'object') {
-    // following.json — { relationships_following: [...] }
-    // Try well-known keys first, then fall back to any array value.
-    const preferred = ['relationships_following', 'relationships_followers', 'connections'];
-    let found = false;
-    for (const key of preferred) {
-      if (Array.isArray(data[key])) { items = data[key]; found = true; break; }
-    }
-    if (!found) {
-      for (const val of Object.values(data)) {
-        if (Array.isArray(val)) { items = val; break; }
-      }
-    }
-  }
-
   const usernames = new Set();
 
-  for (const item of items) {
-    if (!item) continue;
-
-    // Standard shape: { string_list_data: [{ value: "user" }] }
-    if (Array.isArray(item.string_list_data)) {
-      for (const e of item.string_list_data) {
-        if (e && typeof e.value === 'string' && e.value.trim())
-          usernames.add(e.value.trim().toLowerCase());
+  function traverse(obj) {
+    if (!obj) return;
+    if (Array.isArray(obj)) {
+      for (const item of obj) traverse(item);
+    } else if (typeof obj === 'object') {
+      // Standard shape found in string_list_data
+      if (Array.isArray(obj.string_list_data)) {
+        for (const e of obj.string_list_data) {
+          if (e && typeof e.value === 'string' && e.value.trim()) {
+            usernames.add(e.value.trim().toLowerCase());
+          }
+        }
+      }
+      // Flat shape fallback
+      if (typeof obj.value === 'string' && obj.value.trim() && (obj.href || obj.timestamp)) {
+        usernames.add(obj.value.trim().toLowerCase());
+      }
+      
+      // Traverse all properties to find nested structures
+      for (const key of Object.keys(obj)) {
+        if (key !== 'string_list_data') {
+          traverse(obj[key]);
+        }
       }
     }
-    // Flat shape: { value: "user" }
-    if (typeof item.value === 'string' && item.value.trim())
-      usernames.add(item.value.trim().toLowerCase());
-    // Raw string array
-    if (typeof item === 'string' && item.trim())
-      usernames.add(item.trim().toLowerCase());
   }
 
+  traverse(data);
   return usernames;
 }
 
@@ -450,7 +440,7 @@ async function analyze() {
   if (!fFile || !ingFile) {
     setError('Please upload both files before analyzing.'); return;
   }
-  if (!fFile.name.endsWith('.json') || !ingFile.name.endsWith('.json')) {
+  if (!fFile.name.toLowerCase().endsWith('.json') || !ingFile.name.toLowerCase().endsWith('.json')) {
     setError('Both files must be .json format.'); return;
   }
 
