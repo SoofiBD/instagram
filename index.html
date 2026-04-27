@@ -270,18 +270,18 @@
   <div class="upload-grid">
 
     <div class="upload-zone" id="zone-followers">
-      <input type="file" id="input-followers" accept=".json" aria-label="Upload followers.json" />
+      <input type="file" id="input-followers" accept=".json" multiple aria-label="Upload followers JSON files" />
       <span class="upload-icon">👥</span>
       <div class="upload-label">Followers</div>
-      <div class="upload-hint">Drop or click · <code>followers.json</code></div>
+      <div class="upload-hint">Drop or click · <code>followers_1.json</code>, <code>followers_2.json</code>…</div>
       <div class="file-name" id="fname-followers"></div>
     </div>
 
     <div class="upload-zone" id="zone-following">
-      <input type="file" id="input-following" accept=".json" aria-label="Upload following.json" />
+      <input type="file" id="input-following" accept=".json" multiple aria-label="Upload following JSON files" />
       <span class="upload-icon">➡️</span>
       <div class="upload-label">Following</div>
-      <div class="upload-hint">Drop or click · <code>following.json</code></div>
+      <div class="upload-hint">Drop or click · <code>following.json</code> (or multiple)</div>
       <div class="file-name" id="fname-following"></div>
     </div>
 
@@ -344,31 +344,39 @@
 let notFollowingBack = [];      // full sorted list
 let currentView     = [];       // filtered subset
 
-// ─── Upload zones: hover + drag-and-drop ─────────────────────────────────────
+// ─── Upload zones: hover + drag-and-drop (supports multiple files) ───────────
 function initZone(inputId, zoneId, fnameId) {
   const input = document.getElementById(inputId);
   const zone  = document.getElementById(zoneId);
   const fname = document.getElementById(fnameId);
 
-  function markFile(file) {
-    if (!file) return;
-    fname.textContent = '✓ ' + file.name;
+  function markFiles(files) {
+    if (!files || files.length === 0) return;
+    if (files.length === 1) {
+      fname.textContent = '✓ ' + files[0].name;
+    } else {
+      fname.textContent = '✓ ' + files.length + ' dosya seçildi';
+    }
     zone.classList.add('has-file');
   }
 
-  input.addEventListener('change', () => markFile(input.files[0]));
+  input.addEventListener('change', () => markFiles(input.files));
 
   zone.addEventListener('dragover',  e => { e.preventDefault(); zone.classList.add('drag-over'); });
   zone.addEventListener('dragleave', ()  => zone.classList.remove('drag-over'));
   zone.addEventListener('drop', e => {
     e.preventDefault();
     zone.classList.remove('drag-over');
-    const file = e.dataTransfer.files[0];
-    if (file) {
+    const droppedFiles = e.dataTransfer.files;
+    if (droppedFiles.length > 0) {
       const dt = new DataTransfer();
-      dt.items.add(file);
+      // Merge with existing files
+      for (const f of input.files) dt.items.add(f);
+      for (const f of droppedFiles) {
+        if (f.name.toLowerCase().endsWith('.json')) dt.items.add(f);
+      }
       input.files = dt.files;
-      markFile(file);
+      markFiles(input.files);
     }
   });
 }
@@ -380,8 +388,10 @@ initZone('input-following', 'zone-following', 'fname-following');
 function extractUsernameFromHref(href) {
   if (!href || typeof href !== 'string') return null;
   try {
-    // Instagram profile URLs: https://www.instagram.com/username/ or /username
-    const match = href.match(/instagram\.com\/([A-Za-z0-9._]+)/);
+    // Instagram profile URLs:
+    //   https://www.instagram.com/username
+    //   https://www.instagram.com/_u/username  (following.json format)
+    const match = href.match(/instagram\.com\/(?:_u\/)?([A-Za-z0-9._]+)/);
     if (match && match[1]) return match[1].trim().toLowerCase();
   } catch {}
   return null;
@@ -396,68 +406,61 @@ function extractUsernames(data, label) {
     }
   }
 
-  function traverse(obj) {
-    if (!obj) return;
-
-    // Plain string (some formats use simple string arrays)
-    if (typeof obj === 'string') {
-      addUsername(obj);
-      return;
+  // Normalize: unwrap known wrapper keys
+  // following.json → { "relationships_following": [...] }
+  // followers.json (alt) → { "relationships_followers": [...] } or []
+  let items = data;
+  if (!Array.isArray(items) && typeof items === 'object' && items !== null) {
+    // Find the first array-valued key (relationships_following, relationships_followers, etc.)
+    const arrayKey = Object.keys(items).find(k => Array.isArray(items[k]));
+    if (arrayKey) {
+      console.log(`[Follow Analyzer] ${label}: unwrapped key "${arrayKey}" (${items[arrayKey].length} items)`);
+      items = items[arrayKey];
     }
+  }
 
-    if (Array.isArray(obj)) {
-      for (const item of obj) traverse(item);
-      return;
-    }
+  if (!Array.isArray(items)) {
+    console.warn(`[Follow Analyzer] ${label}: data is not an array after unwrapping`, items);
+    return usernames;
+  }
 
-    if (typeof obj !== 'object') return;
+  for (const entry of items) {
+    if (!entry || typeof entry !== 'object') continue;
+    let found = false;
 
-    // ── string_list_data: the standard Instagram shape ──
-    if (Array.isArray(obj.string_list_data)) {
-      for (const e of obj.string_list_data) {
+    // ── Strategy 1: string_list_data[].value (followers.json format) ──
+    if (Array.isArray(entry.string_list_data)) {
+      for (const e of entry.string_list_data) {
         if (!e) continue;
-        // Primary: value field
         if (typeof e.value === 'string' && e.value.trim()) {
           addUsername(e.value);
-        }
-        // Fallback: extract from href URL if value is empty
-        else if (e.href) {
+          found = true;
+        } else if (e.href) {
+          // Fallback: extract from href URL if value is missing
           const fromHref = extractUsernameFromHref(e.href);
-          if (fromHref) addUsername(fromHref);
+          if (fromHref) { addUsername(fromHref); found = true; }
         }
       }
     }
 
-    // ── title field: some export versions put the username here ──
-    if (typeof obj.title === 'string' && obj.title.trim() &&
-        (obj.string_list_data || obj.media_list_data || obj.timestamp || obj.href)) {
-      addUsername(obj.title);
+    // ── Strategy 2: title field (following.json format) ──
+    // Only use title if we didn't already find a username from string_list_data.value
+    if (!found && typeof entry.title === 'string' && entry.title.trim()) {
+      addUsername(entry.title);
+      found = true;
     }
 
-    // ── Flat shape fallback ──
-    if (typeof obj.value === 'string' && obj.value.trim() &&
-        !Array.isArray(obj.string_list_data) &&
-        (obj.href || obj.timestamp)) {
-      addUsername(obj.value);
+    // ── Strategy 3: username / user field (alternative formats) ──
+    if (!found && typeof entry.username === 'string' && entry.username.trim()) {
+      addUsername(entry.username);
+      found = true;
     }
-
-    // ── username / user field (alternative formats) ──
-    if (typeof obj.username === 'string' && obj.username.trim()) {
-      addUsername(obj.username);
-    }
-    if (typeof obj.user === 'string' && obj.user.trim()) {
-      addUsername(obj.user);
-    }
-
-    // ── Recurse all child properties ──
-    for (const key of Object.keys(obj)) {
-      if (key === 'string_list_data') continue; // already processed above
-      traverse(obj[key]);
+    if (!found && typeof entry.user === 'string' && entry.user.trim()) {
+      addUsername(entry.user);
     }
   }
 
-  traverse(data);
-  console.log(`[Follow Analyzer] ${label}: found ${usernames.size} usernames`, [...usernames].slice(0, 5));
+  console.log(`[Follow Analyzer] ${label}: found ${usernames.size} usernames`, [...usernames].slice(0, 10));
   return usernames;
 }
 
@@ -484,14 +487,18 @@ function setError(msg) {
 async function analyze() {
   setError('');
 
-  const fFile  = document.getElementById('input-followers').files[0];
-  const ingFile = document.getElementById('input-following').files[0];
+  const fFiles  = document.getElementById('input-followers').files;
+  const ingFiles = document.getElementById('input-following').files;
 
-  if (!fFile || !ingFile) {
-    setError('Please upload both files before analyzing.'); return;
+  if (fFiles.length === 0 || ingFiles.length === 0) {
+    setError('Lütfen analiz etmeden önce her iki bölüme de dosya yükleyin.'); return;
   }
-  if (!fFile.name.toLowerCase().endsWith('.json') || !ingFile.name.toLowerCase().endsWith('.json')) {
-    setError('Both files must be .json format.'); return;
+
+  // Validate all files are JSON
+  for (const f of [...fFiles, ...ingFiles]) {
+    if (!f.name.toLowerCase().endsWith('.json')) {
+      setError(`"${f.name}" JSON dosyası değil. Sadece .json dosyaları yükleyin.`); return;
+    }
   }
 
   const btn = document.getElementById('btn-analyze');
@@ -499,19 +506,29 @@ async function analyze() {
   btn.innerHTML = '<span class="spinner"></span>Analyzing…';
 
   try {
-    const [fData, ingData] = await Promise.all([readJSON(fFile), readJSON(ingFile)]);
+    // Read ALL files from both slots
+    const fDataArray  = await Promise.all([...fFiles].map(f => readJSON(f)));
+    const ingDataArray = await Promise.all([...ingFiles].map(f => readJSON(f)));
 
-    // Debug: log raw JSON structure keys to help diagnose parsing issues
-    console.log('[Follow Analyzer] Followers raw type:', Array.isArray(fData) ? 'array' : typeof fData,
-      Array.isArray(fData) ? `(${fData.length} items)` : `(keys: ${Object.keys(fData).join(', ')})`);
-    console.log('[Follow Analyzer] Following raw type:', Array.isArray(ingData) ? 'array' : typeof ingData,
-      Array.isArray(ingData) ? `(${ingData.length} items)` : `(keys: ${Object.keys(ingData).join(', ')})`);
+    console.log(`[Follow Analyzer] Loaded ${fDataArray.length} followers file(s), ${ingDataArray.length} following file(s)`);
 
-    const followersSet = extractUsernames(fData, 'Followers');
-    const followingSet = extractUsernames(ingData, 'Following');
+    // Merge all usernames from all files in each slot
+    const followersSet = new Set();
+    for (const fData of fDataArray) {
+      const partial = extractUsernames(fData, 'Followers');
+      for (const u of partial) followersSet.add(u);
+    }
+
+    const followingSet = new Set();
+    for (const ingData of ingDataArray) {
+      const partial = extractUsernames(ingData, 'Following');
+      for (const u of partial) followingSet.add(u);
+    }
+
+    console.log(`[Follow Analyzer] Total: ${followersSet.size} followers, ${followingSet.size} following`);
 
     if (followersSet.size === 0 && followingSet.size === 0)
-      throw new Error('No usernames found. Make sure you uploaded the correct Instagram JSON export files.');
+      throw new Error('Hiçbir kullanıcı adı bulunamadı. Doğru Instagram JSON dışa aktarım dosyalarını yüklediğinizden emin olun.');
 
     notFollowingBack = [...followingSet]
       .filter(u => !followersSet.has(u))
